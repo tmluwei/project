@@ -271,12 +271,16 @@ class RedisHelperTest {
 
         // 3. 高并发秒杀
         Runnable runnable = () -> {
-            while (!Thread.currentThread().isInterrupted()) {
-                Long value = flush(REDIS_KEY, 1);
-                if(value != null && value >= 0) {
-                    System.out.println(Thread.currentThread().getName() + " 扣减库存, 剩余库存: " + value);
-                    break;
+            try {
+                while (!Thread.currentThread().isInterrupted()) {
+                    Long value = flush(REDIS_KEY, 1);
+                    if(value != null && value >= 0) {
+                        System.out.println(Thread.currentThread().getName() + " 扣减库存, 剩余库存: " + value);
+                        break;
+                    }
                 }
+            } catch (Exception e) {
+                e.printStackTrace();
             }
             latch.countDown();
         };
