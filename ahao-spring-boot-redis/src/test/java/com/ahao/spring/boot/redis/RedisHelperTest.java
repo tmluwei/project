@@ -1,29 +1,31 @@
 package com.ahao.spring.boot.redis;
 
 import com.ahao.spring.boot.redis.config.RedisConfig;
-import com.ahao.spring.boot.redis.config.RedisExtension;
 import com.ahao.spring.boot.redis.entity.User;
 import com.ahao.util.spring.SpringContextHolder;
 import com.ahao.util.spring.redis.RedisHelper;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.dao.DataAccessException;
+import org.springframework.data.redis.core.*;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.ContextConfiguration;
+import org.springframework.test.context.junit.jupiter.SpringExtension;
 
 import java.util.Arrays;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 
 
-@ExtendWith(RedisExtension.class)
+@ExtendWith(SpringExtension.class)
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE)
 @ContextConfiguration(classes = {RedisConfig.class, RedisAutoConfiguration.class, SpringContextHolder.class})
 @ActiveProfiles("test-redis")
@@ -256,6 +258,76 @@ class RedisHelperTest {
         Assertions.assertEquals(100, RedisHelper.getInteger(REDIS_KEY).intValue());
         Thread.sleep(2000);
         Assertions.assertNull(RedisHelper.getInteger(REDIS_KEY));
+    }
+
+    @Test
+    public void watch() throws Exception{
+        // 1. 初始化库存
+        int count = 10000;
+        CountDownLatch latch = new CountDownLatch(count);
+        RedisTemplate<String, Object> redisTemplate = RedisHelper.getRedisTemplate();
+        redisTemplate.setEnableTransactionSupport(true);
+        redisTemplate.opsForValue().set(REDIS_KEY, count);
+
+        // 3. 高并发秒杀
+        Runnable runnable = () -> {
+            while (!Thread.currentThread().isInterrupted()) {
+                Long value = flush(REDIS_KEY, 1);
+                if(value >= 0) {
+                    System.out.println(Thread.currentThread().getName() + " 扣减库存, 剩余库存: " + value);
+                    break;
+                }
+            }
+            latch.countDown();
+        };
+
+        // 2. 线程池消费
+        int coreNum = Runtime.getRuntime().availableProcessors();
+        ExecutorService threadPool = Executors.newFixedThreadPool(coreNum);
+        for (int i = 0; i < count; i++) {
+            Future<?> value = threadPool.submit(runnable);
+        }
+
+        // 4. 结束
+        latch.await();
+        Integer value = RedisHelper.getInteger(REDIS_KEY);
+        System.out.println("秒杀完毕:" + value);
+        Assertions.assertEquals(0, value);
+    }
+
+    private Long flush(String key, int num) {
+        StringRedisTemplate redisTemplate = RedisHelper.getStringRedisTemplate();
+        redisTemplate.setEnableTransactionSupport(true);
+        SessionCallback<Long> sessionCallback = new SessionCallback<Long>() {
+            @Override
+            public Long execute(RedisOperations operations) throws DataAccessException {
+                // 1. watch
+                operations.watch(key);
+
+                // 2. 获取 redis 中的值
+                ValueOperations<String, String> valueOperations = operations.opsForValue();
+                Object valueObj = valueOperations.get(REDIS_KEY);
+                if(valueObj == null || !StringUtils.isNumeric(String.valueOf(valueObj))) {
+                    return 0L; // 没有设置库存, 默认库存 0
+                }
+                int value = Integer.parseInt(String.valueOf(valueObj));
+                if (value <= 0) {
+                    return (long) value; // 库存小于0
+                }
+                // 3. 开启事务
+                operations.multi();
+                // 4. 扣减库存
+                value = value - num;
+                valueOperations.set(REDIS_KEY, String.valueOf(value));
+                // 5. 提交事务
+                List exec = operations.exec();
+                if (CollectionUtils.isNotEmpty(exec)) {
+                    return (long) value; // 库存扣减成功
+                }
+                return null; // 异常重试
+            }
+        };
+        return redisTemplate.execute(sessionCallback);
     }
 
     @AfterEach
