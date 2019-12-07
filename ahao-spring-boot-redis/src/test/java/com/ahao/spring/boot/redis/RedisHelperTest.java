@@ -273,7 +273,7 @@ class RedisHelperTest {
         Runnable runnable = () -> {
             while (!Thread.currentThread().isInterrupted()) {
                 Long value = flush(REDIS_KEY, 1);
-                if(value >= 0) {
+                if(value != null && value >= 0) {
                     System.out.println(Thread.currentThread().getName() + " 扣减库存, 剩余库存: " + value);
                     break;
                 }
